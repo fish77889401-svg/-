@@ -14,51 +14,33 @@ from linebot.v3.webhooks import (
     MessageEvent, TextMessageContent,
     JoinEvent, MemberJoinedEvent
 )
+from pymongo import MongoClient
 
 app = Flask(__name__)
 
 CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET", "667b16a4820dd8e65d4caa00b80210f9")
 CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN", "mx7Oz6AD9+iCpY4RoQ6nFPE795eETLgxRfi6vdZFGa6ymsqKc6EvTkaqeX7kTg1PIsy2c0Wvmzabtb0weS7Je+5kijz/bqAJUxLgGC97+HZ4lBhSgzc2HLu/BtQdWzcCoiDwtXzWuYN/8Zt42qnyxgdB04t89/1O/w1cDnyilFU=")
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://linebotuser:linebot1234@cluster0.skhhqmy.mongodb.net/?appName=Cluster0")
 
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
-DATA_FILE = "data.json"
+TZ = timezone(timedelta(hours=8))
 CHECKIN_COOLDOWN = 12 * 3600
-TZ = timezone(timedelta(hours=8))  # GMT+8
 
-# ══════════════════════════════════════════════════════════
-# 資料結構：每個群組完全獨立
-# data = {
-#   "admins": [uid, ...],
-#   "groups": {
-#     "gid": {
-#       "current_week": 1,
-#       "current_month": 1,
-#       "current_task": "...",
-#       "weekly_checkin_limit": 7,
-#       "task_history": [...],
-#       "members": {
-#         "uid": {
-#           "name": "小明",
-#           "scores": { "月": { "週": 分數 } },
-#           "checkins": { "月-週": 次數 },
-#           "checkin_ts": { "月-週_ts": timestamp }
-#         }
-#       }
-#     }
-#   }
-# }
-# ══════════════════════════════════════════════════════════
+# ── MongoDB 連線 ──────────────────────────────────────────
+mongo = MongoClient(MONGO_URI)
+db = mongo["linebot"]
+col = db["data"]
 
 def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+    doc = col.find_one({"_id": "main"})
+    if doc:
+        doc.pop("_id", None)
+        return doc
     return {"admins": [], "groups": {}}
 
 def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    col.replace_one({"_id": "main"}, {"_id": "main", **data}, upsert=True)
 
 # ── 群組 ─────────────────────────────────────────────────
 def get_group(data, gid):
@@ -91,21 +73,16 @@ def ensure_member(g, uid):
     return m
 
 def find_member_by_name(g, name):
-    # 完全符合優先
     for mid, m in g["members"].items():
         if name == m["name"]:
             return mid
-    # 模糊
     for mid, m in g["members"].items():
         if name in m["name"]:
             return mid
     return None
 
 def get_display_name(g, uid):
-    """取得成員顯示名稱，優先用已登記的名稱"""
-    m = g["members"].get(uid, {})
-    name = m.get("name", f"成員_{uid[-4:]}")
-    return name
+    return g["members"].get(uid, {}).get("name", f"成員_{uid[-4:]}")
 
 # ── 打卡 ─────────────────────────────────────────────────
 def checkin_key(month, week):
@@ -135,9 +112,8 @@ def add_score(g, uid, month, week, pts):
     member.setdefault("scores", {}).setdefault(m, {})
     member["scores"][m][w] = member["scores"][m].get(w, 0) + pts
 
-# ── 排行榜（完整，支援同分同名次）──────────────────────
+# ── 排行榜 ────────────────────────────────────────────────
 def build_ranking_score(g, month):
-    """月分數排行，回傳 [(rank, name, score), ...]，同分同名次"""
     raw = [(get_display_name(g, mid), get_monthly_score(g, mid, month))
            for mid in g["members"]]
     raw.sort(key=lambda x: -x[1])
@@ -150,7 +126,6 @@ def build_ranking_score(g, month):
     return result
 
 def build_ranking_checkin(g, month, week):
-    """週打卡次數排行，回傳 [(rank, name, count), ...]，同分同名次"""
     key = checkin_key(month, week)
     raw = [(get_display_name(g, mid), m.get("checkins", {}).get(key, 0))
            for mid, m in g["members"].items()]
@@ -164,10 +139,9 @@ def build_ranking_checkin(g, month, week):
     return result
 
 def rank_medal(rank):
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    return medals.get(rank, f"{rank}.")
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank}.")
 
-# ── 週結算加分 ────────────────────────────────────────────
+# ── 週結算 ────────────────────────────────────────────────
 def calc_weekly_bonus(g, month, week):
     key = checkin_key(month, week)
     counts = {uid: m.get("checkins", {}).get(key, 0)
@@ -226,59 +200,45 @@ def format_task_history(g, is_admin):
         lines.append("")
     return "\n".join(lines).strip()
 
-# ── 週末鼓勵推播 ──────────────────────────────────────────
+# ── 週末推播 ──────────────────────────────────────────────
 def weekend_reminder():
-    """每分鐘檢查一次，週六日 20:00 GMT+8 推播鼓勵訊息"""
+    sent_today = set()
     while True:
         now = datetime.now(TZ)
-        # 週六=5, 週日=6
-        if now.weekday() in (5, 6) and now.hour == 20 and now.minute == 0:
+        today_key = now.strftime("%Y-%m-%d")
+        if now.weekday() in (5, 6) and now.hour == 20 and now.minute == 0 and today_key not in sent_today:
+            sent_today.add(today_key)
             try:
                 data = load_data()
+                day_label = "週六" if now.weekday() == 5 else "週日"
                 for gid, g in data["groups"].items():
                     week = g["current_week"]
                     month = g["current_month"]
                     limit = g.get("weekly_checkin_limit", 7)
-                    day_label = "週六" if now.weekday() == 5 else "週日"
-
-                    # 統計本週還沒打滿的人
                     key = checkin_key(month, week)
-                    not_done = []
-                    for uid, m in g["members"].items():
-                        cnt = m.get("checkins", {}).get(key, 0)
-                        if cnt < limit:
-                            not_done.append((get_display_name(g, uid), cnt))
-
+                    not_done = [(get_display_name(g, uid), m.get("checkins", {}).get(key, 0))
+                                for uid, m in g["members"].items()
+                                if m.get("checkins", {}).get(key, 0) < limit]
                     if not_done:
-                        names = "、".join([f"{n}（{c}次）" for n, c in not_done])
-                        msg = (
-                            f"📣 週末加油提醒！\n\n"
-                            f"今天是{day_label}，本週還剩最後幾天！\n"
-                            f"本週任務：{g['current_task']}\n\n"
-                            f"以下成員還未打滿 {limit} 次：\n"
-                            f"{names}\n\n"
-                            f"最後衝刺！大家加油 💪"
-                        )
+                        names = "\n".join([f"  • {n}（已打 {c} 次）" for n, c in not_done])
+                        msg = (f"📣 週末加油提醒！\n\n"
+                               f"今天是{day_label}，本週最後衝刺！\n"
+                               f"本週任務：{g['current_task']}\n\n"
+                               f"以下成員還未打滿 {limit} 次：\n{names}\n\n"
+                               f"加油！最後兩天把事情完成 💪")
                     else:
-                        msg = (
-                            f"📣 週末加油提醒！\n\n"
-                            f"今天是{day_label}，大家這週都表現超棒！\n"
-                            f"本週任務：{g['current_task']}\n"
-                            f"繼續保持，週末加油 💪🎉"
-                        )
+                        msg = (f"📣 週末加油提醒！\n\n"
+                               f"今天是{day_label}，大家這週都超棒！🎉\n"
+                               f"本週任務：{g['current_task']}\n"
+                               f"繼續保持，週末加油 💪")
                     with ApiClient(configuration) as api_client:
                         MessagingApi(api_client).push_message(
-                            PushMessageRequest(
-                                to=gid,
-                                messages=[TextMessage(text=msg)]
-                            )
-                        )
+                            PushMessageRequest(to=gid, messages=[TextMessage(text=msg)]))
             except Exception as e:
                 print(f"週末推播錯誤：{e}")
-            time.sleep(60)  # 避免同一分鐘重複發送
         time.sleep(30)
 
-# ── Reply / Push ─────────────────────────────────────────
+# ── Reply ─────────────────────────────────────────────────
 def reply_msg(event, text):
     with ApiClient(configuration) as api_client:
         MessagingApi(api_client).reply_message(
@@ -303,7 +263,7 @@ def handle_join(event):
     g = get_group(data, gid)
     save_data(data)
     reply_msg(event,
-        f"大家好！我是任務統計機器人 🤖\n\n"
+        f"大家好！我是副班長 🤖\n\n"
         f"目前是第 {g['current_month']} 月 第 {g['current_week']} 週\n"
         f"本週任務：{g['current_task']}\n\n"
         f"【成員指令】\n"
@@ -374,8 +334,7 @@ def handle_message(event):
         name = get_display_name(g, uid)
         current = get_checkins(g, uid, month, week)
         last_ts = get_last_ts(g, uid, month, week)
-        elapsed = now_ts - last_ts
-        remaining = CHECKIN_COOLDOWN - elapsed
+        remaining = CHECKIN_COOLDOWN - (now_ts - last_ts)
 
         if current >= limit:
             rep = f"{name}，本週已打卡 {current} 次，達上限（每週最多 {limit} 次）"
@@ -390,21 +349,19 @@ def handle_message(event):
                    f"本月累計分數：{get_monthly_score(g, uid, month)} 分\n"
                    f"（下次最快 12 小時後可再打卡）")
 
-    # 排行榜（月分數，完整列出）
+    # 排行榜
     elif text in ["排行榜", "/排行"]:
         ranking = build_ranking_score(g, month)
-        lines = [f"📊 第 {month} 月分數排行榜（共 {len(ranking)} 人）\n"]
-        # 找出最後三名（倒數三個不同名次）
         last_ranks = sorted(set(r for r, _, _ in ranking), reverse=True)[:3]
+        lines = [f"📊 第 {month} 月分數排行榜（共 {len(ranking)} 人）\n"]
         for rank, name, score in ranking:
-            medal = rank_medal(rank)
             tag = " 🍽️" if rank in last_ranks and len(ranking) >= 4 else ""
-            lines.append(f"{medal} {name}：{score} 分{tag}")
+            lines.append(f"{rank_medal(rank)} {name}：{score} 分{tag}")
         if len(ranking) >= 4:
-            lines.append("\n🍽️ 本月最後三名請第一名吃飯，一起加油！")
+            lines.append("\n🍽️ 最後三名本月要請第一名吃飯，一起加油！")
         rep = "\n".join(lines)
 
-    # 週排行（打卡次數，完整列出）
+    # 週排行
     elif text in ["週排行", "/週排行"]:
         ranking = build_ranking_checkin(g, month, week)
         lines = [f"📅 第 {month} 月第 {week} 週打卡排行（共 {len(ranking)} 人）\n"]
@@ -420,8 +377,7 @@ def handle_message(event):
     elif text in ["我的分數", "/我的分數"]:
         name = get_display_name(g, uid)
         last_ts = get_last_ts(g, uid, month, week)
-        elapsed = now_ts - last_ts
-        remaining = CHECKIN_COOLDOWN - elapsed
+        remaining = CHECKIN_COOLDOWN - (now_ts - last_ts)
         if last_ts > 0 and remaining > 0:
             hrs = remaining // 3600
             mins = (remaining % 3600) // 60
@@ -470,7 +426,7 @@ def handle_message(event):
             rep = (f"✅ {name} 已成為第一位管理員！\n\n"
                    f"可用指令：\n"
                    f"/任務 [內容] — 設定本週任務\n"
-                   f"/週上限 [次數] — 設定每週打卡上限（預設7次）\n"
+                   f"/週上限 [次數] — 每週打卡上限（預設7次）\n"
                    f"/週結算 — 結算週排名加分\n"
                    f"/下一週 / /下一月 — 推進時間\n"
                    f"/加管理員 [名字] — 新增其他管理員")
@@ -631,9 +587,8 @@ def handle_message(event):
             first_name = ranking[0][1] if ranking else "第一名"
             lines = [f"🏆 第 {month} 月最終結算（共 {len(ranking)} 人）\n"]
             for rank, name, score in ranking:
-                medal = rank_medal(rank)
                 tag = " 🍽️" if rank in last_ranks and len(ranking) >= 4 else ""
-                lines.append(f"{medal} {name}：{score} 分{tag}")
+                lines.append(f"{rank_medal(rank)} {name}：{score} 分{tag}")
             if len(ranking) >= 4:
                 lines.append(f"\n🍽️ 最後三名要請 {first_name} 吃飯喔！")
                 lines.append("感謝大家這個月的努力，繼續加油！🎉")
@@ -643,9 +598,8 @@ def handle_message(event):
         save_data(data)
         reply_msg(event, rep)
 
-# ── 啟動週末提醒背景執行緒 ───────────────────────────────
-reminder_thread = threading.Thread(target=weekend_reminder, daemon=True)
-reminder_thread.start()
+# ── 週末推播背景執行緒 ────────────────────────────────────
+threading.Thread(target=weekend_reminder, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
