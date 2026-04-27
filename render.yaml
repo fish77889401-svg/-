@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: linebot-task-tracker
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app
+    envVars:
+      - key: CHANNEL_SECRET
+        value: 667b16a4820dd8e65d4caa00b80210f9
+      - key: CHANNEL_ACCESS_TOKEN
+        value: mx7Oz6AD9+iCpY4RoQ6nFPE795eETLgxRfi6vdZFGa6ymsqKc6EvTkaqeX7kTg1PIsy2c0Wvmzabtb0weS7Je+5kijz/bqAJUxLgGC97+HZ4lBhSgzc2HLu/BtQdWzcCoiDwtXzWuYN/8Zt42qnyxgdB04t89/1O/w1cDnyilFU=
