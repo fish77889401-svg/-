@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -21,6 +22,9 @@ configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 DATA_FILE = "data.json"
 
+CHECKIN_COOLDOWN = 12 * 3600  # 12 小時（秒）
+
+# ── 資料 ─────────────────────────────────────────────────
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -31,32 +35,57 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# ── 群組 ─────────────────────────────────────────────────
 def get_group(data, gid):
     if gid not in data["groups"]:
         data["groups"][gid] = {
             "current_week": 1, "current_month": 1,
-            "current_task": "（尚未設定任務）", "weekly_checkin_limit": 7
+            "current_task": "（尚未設定任務）",
+            "weekly_checkin_limit": 7,
+            "task_history": []   # [{"month":1,"week":1,"task":"..."}]
         }
-    return data["groups"][gid]
+    g = data["groups"][gid]
+    if "task_history" not in g:
+        g["task_history"] = []
+    return g
 
+# ── 打卡 key ──────────────────────────────────────────────
 def checkin_key(month, week):
     return f"{month}-{week}"
 
 def get_checkins(data, uid, month, week):
     return data["members"].get(uid, {}).get("checkins", {}).get(checkin_key(month, week), 0)
 
-def add_checkin(data, uid, month, week):
+def get_last_checkin_ts(data, uid, month, week):
+    key = checkin_key(month, week) + "_ts"
+    return data["members"].get(uid, {}).get("checkin_ts", {}).get(key, 0)
+
+def add_checkin(data, uid, month, week, now_ts):
     key = checkin_key(month, week)
+    ts_key = key + "_ts"
     data["members"][uid].setdefault("checkins", {})[key] = \
         data["members"][uid]["checkins"].get(key, 0) + 1
+    data["members"][uid].setdefault("checkin_ts", {})[ts_key] = now_ts
 
+# ── 分數 ─────────────────────────────────────────────────
 def get_monthly_score(data, uid, month):
     return sum(data["members"].get(uid, {}).get("scores", {}).get(str(month), {}).values())
 
 def add_score(data, uid, month, week, pts):
     m, w = str(month), str(week)
     data["members"][uid].setdefault("scores", {}).setdefault(m, {})
-    data["members"][uid]["scores"][m][w] = data["members"][uid]["scores"][m].get(w, 0) + pts
+    data["members"][uid]["scores"][m][w] = \
+        data["members"][uid]["scores"][m].get(w, 0) + pts
+
+# ── 成員 ─────────────────────────────────────────────────
+def ensure_member(data, uid):
+    if uid not in data["members"]:
+        data["members"][uid] = {
+            "name": f"成員_{uid[-4:]}",
+            "scores": {}, "checkins": {}, "checkin_ts": {}
+        }
+    if "checkin_ts" not in data["members"][uid]:
+        data["members"][uid]["checkin_ts"] = {}
 
 def find_member_by_name(data, name):
     for mid, m in data["members"].items():
@@ -67,6 +96,7 @@ def find_member_by_name(data, name):
             return mid
     return None
 
+# ── 週結算加分 ────────────────────────────────────────────
 def calc_weekly_bonus(data, month, week):
     key = checkin_key(month, week)
     counts = {uid: m.get("checkins", {}).get(key, 0)
@@ -85,16 +115,62 @@ def calc_weekly_bonus(data, month, week):
             bonuses[uid] = 1
     return bonuses
 
+# ── 歷史任務（記錄最近 N 筆）────────────────────────────
+def record_task_history(g, month, week, task):
+    history = g.setdefault("task_history", [])
+    # 避免重複記錄同一週
+    for h in history:
+        if h["month"] == month and h["week"] == week:
+            h["task"] = task
+            return
+    history.append({"month": month, "week": week, "task": task})
+    # 只保留最近 20 筆（足夠查 4 週）
+    if len(history) > 20:
+        g["task_history"] = history[-20:]
+
+def format_task_history(g, is_admin, data, month):
+    history = g.get("task_history", [])
+    if not history:
+        return "尚無歷史任務紀錄"
+    # 取最近 4 筆（不含本週）
+    cur_week = g["current_week"]
+    cur_month = g["current_month"]
+    past = [h for h in history if not (h["month"] == cur_month and h["week"] == cur_week)]
+    past = past[-4:]  # 最近 4 週
+    if not past:
+        return "目前只有本週任務，尚無過去紀錄"
+
+    lines = ["📜 歷史任務（最近四週）\n"]
+    for h in reversed(past):
+        lines.append(f"第 {h['month']} 月第 {h['week']} 週：{h['task']}")
+        if is_admin:
+            # 顯示該週打卡排行
+            key = checkin_key(h["month"], h["week"])
+            ranking = sorted(
+                [(m["name"], m.get("checkins", {}).get(key, 0),
+                  m.get("scores", {}).get(str(h["month"]), {}).get(str(h["week"]), 0))
+                 for uid, m in data["members"].items()],
+                key=lambda x: -x[1]
+            )
+            sub = []
+            for name, cnt, score in ranking:
+                if cnt > 0:
+                    sub.append(f"  • {name}：打卡 {cnt} 次 / 該週得分 {score} 分")
+            if sub:
+                lines.extend(sub)
+            else:
+                lines.append("  （無人打卡）")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+# ── Reply ─────────────────────────────────────────────────
 def reply_msg(event, text):
     with ApiClient(configuration) as api_client:
         MessagingApi(api_client).reply_message(
             ReplyMessageRequest(reply_token=event.reply_token,
                                 messages=[TextMessage(text=text)]))
 
-def ensure_member(data, uid):
-    if uid not in data["members"]:
-        data["members"][uid] = {"name": f"成員_{uid[-4:]}", "scores": {}, "checkins": {}}
-
+# ── Webhook ───────────────────────────────────────────────
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
@@ -117,9 +193,10 @@ def handle_join(event):
         f"本週任務：{g['current_task']}\n\n"
         f"【成員指令】\n"
         f"/我是 [名字] — 登記你的名稱（請先做！）\n"
-        f"達標 — 今日打卡\n"
+        f"達標 — 今日打卡（每次間隔 12 小時）\n"
         f"排行榜 — 本月分數排行\n"
         f"週排行 — 本週打卡次數排行\n"
+        f"歷史任務 — 查看前四週任務\n"
         f"我的分數 — 查看分數與打卡數\n"
         f"本週任務 — 查看當前任務\n"
         f"說明 — 顯示所有指令\n\n"
@@ -149,6 +226,7 @@ def handle_message(event):
     month = g["current_month"]
     limit = g.get("weekly_checkin_limit", 7)
     is_admin = uid in data["admins"]
+    now_ts = int(time.time())
     rep = None
 
     # /我是
@@ -170,22 +248,32 @@ def handle_message(event):
                 else:
                     rep = f"✅ 名稱已從「{old}」更新為「{new_name}」"
 
-    # 達標
+    # 達標（12 小時冷卻）
     elif text == "達標":
         name = data["members"][uid]["name"]
         current = get_checkins(data, uid, month, week)
+        last_ts = get_last_checkin_ts(data, uid, month, week)
+        elapsed = now_ts - last_ts
+        remaining = CHECKIN_COOLDOWN - elapsed
+
         if current >= limit:
             rep = f"{name}，本週已打卡 {current} 次，達上限（每週最多 {limit} 次）"
+        elif last_ts > 0 and remaining > 0:
+            hrs = remaining // 3600
+            mins = (remaining % 3600) // 60
+            rep = f"⏳ {name}，距離下次可打卡還需等待 {hrs} 小時 {mins} 分鐘"
         else:
-            add_checkin(data, uid, month, week)
+            add_checkin(data, uid, month, week, now_ts)
             rep = (f"✅ {name} 打卡成功！\n"
                    f"本週第 {current+1} 次（上限 {limit} 次）\n"
-                   f"本月累計分數：{get_monthly_score(data, uid, month)} 分")
+                   f"本月累計分數：{get_monthly_score(data, uid, month)} 分\n"
+                   f"（下次最快 12 小時後可再打卡）")
 
     # 排行榜（月分數）
     elif text in ["排行榜", "/排行"]:
         ranking = sorted(
-            [(m["name"], get_monthly_score(data, mid, month)) for mid, m in data["members"].items()],
+            [(m["name"], get_monthly_score(data, mid, month))
+             for mid, m in data["members"].items()],
             key=lambda x: -x[1])
         medals = ["🥇","🥈","🥉"]
         lines = [f"📊 第 {month} 月分數排行榜\n"]
@@ -197,7 +285,8 @@ def handle_message(event):
     elif text in ["週排行", "/週排行"]:
         key = checkin_key(month, week)
         ranking = sorted(
-            [(m["name"], m.get("checkins",{}).get(key,0)) for mid, m in data["members"].items()],
+            [(m["name"], m.get("checkins",{}).get(key,0))
+             for mid, m in data["members"].items()],
             key=lambda x: -x[1])
         medals = ["🥇","🥈","🥉"]
         lines = [f"📅 第 {month} 月第 {week} 週打卡排行\n"]
@@ -205,12 +294,26 @@ def handle_message(event):
             lines.append(f"{medals[i] if i<3 else str(i+1)+'.'} {name}：{count} 次")
         rep = "\n".join(lines)
 
+    # 歷史任務
+    elif text in ["歷史任務", "/歷史任務"]:
+        rep = format_task_history(g, is_admin, data, month)
+
     # 我的分數
     elif text in ["我的分數", "/我的分數"]:
         name = data["members"][uid]["name"]
+        last_ts = get_last_checkin_ts(data, uid, month, week)
+        elapsed = now_ts - last_ts
+        remaining = CHECKIN_COOLDOWN - elapsed
+        if last_ts > 0 and remaining > 0:
+            hrs = remaining // 3600
+            mins = (remaining % 3600) // 60
+            cd_msg = f"下次打卡：{hrs} 小時 {mins} 分後"
+        else:
+            cd_msg = "現在可以打卡 ✅"
         rep = (f"👤 {name}\n"
                f"本月累計分數：{get_monthly_score(data, uid, month)} 分\n"
-               f"本週打卡次數：{get_checkins(data, uid, month, week)} / {limit} 次")
+               f"本週打卡次數：{get_checkins(data, uid, month, week)} / {limit} 次\n"
+               f"{cd_msg}")
 
     # 本週任務
     elif text in ["本週任務", "/本週任務"]:
@@ -222,10 +325,11 @@ def handle_message(event):
             f"📖 指令說明{'（你是管理員 ✅）' if is_admin else ''}\n\n"
             "【所有成員】\n"
             "/我是 [名字] — 登記或修改名稱\n"
-            "達標 — 今日任務打卡\n"
+            "達標 — 今日任務打卡（12小時冷卻）\n"
             "排行榜 — 本月分數排行\n"
             "週排行 — 本週打卡次數排行\n"
-            "我的分數 — 查看分數與打卡數\n"
+            "歷史任務 — 查看前四週任務\n"
+            "我的分數 — 查看分數與打卡狀態\n"
             "本週任務 — 查看當前任務\n\n"
             "【管理員專用】\n"
             "/任務 [內容] — 設定本週任務\n"
@@ -237,10 +341,12 @@ def handle_message(event):
             "/下一月 — 進入下一個月\n"
             "/月結算 — 顯示本月最終結算\n"
             "/加管理員 [名字] — 新增管理員\n"
-            "/移除管理員 [名字] — 移除管理員"
+            "/移除管理員 [名字] — 移除管理員\n\n"
+            "【管理員查看歷史任務】\n"
+            "歷史任務 — 顯示前四週任務＋各成員打卡數與分數"
         )
 
-    # /設管理員（無管理員時才能用）
+    # /設管理員
     elif text == "/設管理員":
         if len(data["admins"]) == 0:
             data["admins"].append(uid)
@@ -262,7 +368,7 @@ def handle_message(event):
         else:
             target = find_member_by_name(data, text[6:].strip())
             if not target:
-                rep = f"找不到此成員，請確認對方已用「/我是」登記名稱"
+                rep = "找不到此成員，請確認對方已用「/我是」登記名稱"
             elif target in data["admins"]:
                 rep = "對方已經是管理員了！"
             else:
@@ -285,14 +391,18 @@ def handle_message(event):
                 data["admins"].remove(target)
                 rep = f"✅ 已移除「{data['members'][target]['name']}」的管理員權限"
 
-    # /任務
+    # /任務（設定時自動記錄歷史）
     elif text.startswith("/任務 "):
         if not is_admin:
             rep = "❌ 管理員專用指令"
         else:
             task = text[4:].strip()
+            # 把舊任務先存入歷史
+            if g["current_task"] != "（尚未設定任務）":
+                record_task_history(g, month, week, g["current_task"])
             g["current_task"] = task
-            rep = f"✅ 第 {week} 週任務已設定：\n{task}\n\n完成後輸入「達標」打卡！（每週最多 {limit} 次）"
+            record_task_history(g, month, week, task)
+            rep = f"✅ 第 {week} 週任務已設定：\n{task}\n\n完成後輸入「達標」打卡！（每週最多 {limit} 次，12小時冷卻）"
 
     # /週上限
     elif text.startswith("/週上限 "):
@@ -372,6 +482,9 @@ def handle_message(event):
         if not is_admin:
             rep = "❌ 管理員專用指令"
         else:
+            # 記錄當週任務到歷史
+            if g["current_task"] != "（尚未設定任務）":
+                record_task_history(g, month, week, g["current_task"])
             g["current_week"] += 1
             rep = f"📅 已推進到第 {month} 月 第 {g['current_week']} 週！\n請用「/任務 內容」設定新任務。"
 
@@ -380,6 +493,8 @@ def handle_message(event):
         if not is_admin:
             rep = "❌ 管理員專用指令"
         else:
+            if g["current_task"] != "（尚未設定任務）":
+                record_task_history(g, month, week, g["current_task"])
             old = g["current_month"]
             g["current_month"] += 1
             g["current_week"] = 1
@@ -391,7 +506,8 @@ def handle_message(event):
             rep = "❌ 管理員專用指令"
         else:
             ranking = sorted(
-                [(m["name"], get_monthly_score(data, mid, month)) for mid, m in data["members"].items()],
+                [(m["name"], get_monthly_score(data, mid, month))
+                 for mid, m in data["members"].items()],
                 key=lambda x: -x[1])
             medals = ["🥇","🥈","🥉"]
             lines = [f"🏆 第 {month} 月最終結算\n"]
