@@ -326,8 +326,8 @@ def handle_message(event):
                 else:
                     rep = f"✅ 名稱已從「{old}」更新為「{new_name}」"
 
-    # 達標
-    elif text == "達標":
+    # 達標／達成／完成
+    elif text in ["達標", "達成", "完成"]:
         name = get_display_name(g, uid)
         current = get_checkins(g, uid, month, week)
         last_ts = get_last_ts(g, uid, month, week)
