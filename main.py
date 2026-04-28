@@ -412,7 +412,8 @@ def handle_message(event):
             "【管理員專用】\n"
             "/任務 [內容] — 設定本週任務\n"
             "/週上限 [次數] — 設定每週打卡上限\n"
-            "/補打卡 [名字] [次數] — 補登打卡次數\n"
+            "/補打卡 [名字] [次數] — 補登打卡次數（可多行）\n"
+            "/減打卡 [名字] [次數] — 扣除打卡次數（可多行）\n"
             "/獎勵 [名字] [分數] — 額外加分（可多行）\n"
             "/扣分 [名字] [分數] — 扣分（可多行）\n"
             "/週結算 — 結算本週排名加分\n"
@@ -432,7 +433,8 @@ def handle_message(event):
                    f"可用指令：\n"
                    f"/任務 [內容] — 設定本週任務\n"
                    f"/週上限 [次數] — 每週打卡上限（預設7次）\n"
-                   f"/補打卡 [名字] [次數] — 補登打卡次數\n"
+                   f"/補打卡 [名字] [次數] — 補登打卡次數（可多行）\n"
+                   f"/減打卡 [名字] [次數] — 扣除打卡次數（可多行）\n"
                    f"/週結算 — 結算週排名加分\n"
                    f"/下一週 / /下一月 — 推進時間\n"
                    f"/加管理員 [名字] — 新增其他管理員")
@@ -498,12 +500,16 @@ def handle_message(event):
             except ValueError:
                 rep = "格式錯誤，請用：/週上限 7"
 
-    # /補打卡（管理員幫成員補登打卡次數）
-    elif text.startswith("/補打卡 "):
-        if not is_admin:
-            rep = "❌ 管理員專用指令"
-        else:
-            parts = text.split()
+    # /補打卡（支援多行批次）
+    elif "/補打卡 " in text and is_admin:
+        lines_in = text.strip().splitlines()
+        results = []
+        errors = []
+        for line in lines_in:
+            line = line.strip()
+            if not line.startswith("/補打卡 "):
+                continue
+            parts = line.split()
             if len(parts) >= 3:
                 target = find_member_by_name(g, parts[1])
                 try:
@@ -513,14 +519,54 @@ def handle_message(event):
                         new_count = min(current + add_n, limit)
                         set_checkin_count(g, target, month, week, new_count)
                         name = get_display_name(g, target)
-                        rep = (f"✅ 已為「{name}」補登 {add_n} 次打卡\n"
-                               f"本週打卡次數：{new_count} / {limit} 次")
+                        results.append(f"✅ {name} 補打卡 +{add_n} 次（本週 {new_count}/{limit} 次）")
                     else:
-                        rep = f"找不到「{parts[1]}」"
+                        errors.append(f"❌ 找不到「{parts[1]}」")
                 except ValueError:
-                    rep = "格式：/補打卡 名字 次數"
+                    errors.append(f"❌ 格式錯誤：{line}")
             else:
-                rep = "格式：/補打卡 名字 次數"
+                errors.append(f"❌ 格式錯誤：{line}")
+        if results or errors:
+            rep = "📋 補打卡結果：\n\n" + "\n".join(results + errors)
+        else:
+            rep = "格式：/補打卡 名字 次數（可多行）"
+
+    elif text.startswith("/補打卡 ") and not is_admin:
+        rep = "❌ 管理員專用指令"
+
+    # /減打卡（支援多行批次）
+    elif "/減打卡 " in text and is_admin:
+        lines_in = text.strip().splitlines()
+        results = []
+        errors = []
+        for line in lines_in:
+            line = line.strip()
+            if not line.startswith("/減打卡 "):
+                continue
+            parts = line.split()
+            if len(parts) >= 3:
+                target = find_member_by_name(g, parts[1])
+                try:
+                    sub_n = int(parts[2])
+                    if target:
+                        current = get_checkins(g, target, month, week)
+                        new_count = max(current - sub_n, 0)
+                        set_checkin_count(g, target, month, week, new_count)
+                        name = get_display_name(g, target)
+                        results.append(f"📉 {name} 減打卡 -{sub_n} 次（本週 {new_count}/{limit} 次）")
+                    else:
+                        errors.append(f"❌ 找不到「{parts[1]}」")
+                except ValueError:
+                    errors.append(f"❌ 格式錯誤：{line}")
+            else:
+                errors.append(f"❌ 格式錯誤：{line}")
+        if results or errors:
+            rep = "📋 減打卡結果：\n\n" + "\n".join(results + errors)
+        else:
+            rep = "格式：/減打卡 名字 次數（可多行）"
+
+    elif text.startswith("/減打卡 ") and not is_admin:
+        rep = "❌ 管理員專用指令"
 
     # /獎勵（支援多行批次）
     elif "/獎勵 " in text and is_admin:
