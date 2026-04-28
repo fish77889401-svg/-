@@ -27,20 +27,30 @@ handler = WebhookHandler(CHANNEL_SECRET)
 TZ = timezone(timedelta(hours=8))
 CHECKIN_COOLDOWN = 12 * 3600
 
-# ── MongoDB ───────────────────────────────────────────────
-mongo = MongoClient(MONGO_URI)
-db = mongo["linebot"]
-col = db["data"]
+# ── MongoDB（延遲初始化，解決 fork-safe 問題）────────────
+_mongo_client = None
+
+def get_col():
+    global _mongo_client
+    if _mongo_client is None:
+        _mongo_client = MongoClient(MONGO_URI)
+    return _mongo_client["linebot"]["data"]
 
 def load_data():
-    doc = col.find_one({"_id": "main"})
-    if doc:
-        doc.pop("_id", None)
-        return doc
+    try:
+        doc = get_col().find_one({"_id": "main"})
+        if doc:
+            doc.pop("_id", None)
+            return doc
+    except Exception as e:
+        print(f"load_data error: {e}")
     return {"groups": {}}
 
 def save_data(data):
-    col.replace_one({"_id": "main"}, {"_id": "main", **data}, upsert=True)
+    try:
+        get_col().replace_one({"_id": "main"}, {"_id": "main", **data}, upsert=True)
+    except Exception as e:
+        print(f"save_data error: {e}")
 
 # ── 群組（管理員改為各群組獨立）─────────────────────────
 def get_group(data, gid):
