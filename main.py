@@ -2,6 +2,7 @@ import os
 import json
 import time
 import threading
+import random
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
@@ -353,7 +354,18 @@ def handle_message(event):
         name = get_display_name(g, uid)
         add_share(g, uid, month)
         total = get_shares(g, uid, month)
-        rep = f"📢 {name} 分享成功！\n本月累計分享：{total} 次"
+        cheers = [
+            f"哇！{name}同學主動分享了！副班長超感動 🥹✨\n你的分享讓大家更有動力，繼續保持！",
+            f"太棒了！{name}同學又來分享囉 🎉\n副班長幫你記好了，你是大家的榜樣！",
+            f"{name}同學分享達人出現！📢\n每一次分享都是在為班級加油，謝謝你！",
+            f"副班長收到！{name}同學的分享已記錄 ✅\n你的行動力真的讓人佩服 💪",
+            f"🌟 {name}同學！你的分享點亮了今天！\n副班長替大家謝謝你，繼續加油哦！",
+            f"{name}同學太勤快了吧！📣\n分享精神滿分，副班長幫你蓋章認證 🏅",
+            f"哎呀！{name}同學又來啦 😄🎊\n副班長最喜歡看到你分享了，大家都在看喔！",
+            f"📢 {name}同學的分享已送達全班！\n你每次的分享都是最好的示範，繼續衝！",
+        ]
+        msg = random.choice(cheers)
+        rep = f"{msg}\n\n本月累計分享：{total} 次 📢"
 
     # 達標／達成／完成
     elif text in ["達標", "達成", "完成"]:
