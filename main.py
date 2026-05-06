@@ -78,7 +78,7 @@ def ensure_member(g, uid):
             "scores": {}, "checkins": {}, "checkin_ts": {}
         }
     m = g["members"][uid]
-    for key in ["checkin_ts", "scores", "checkins"]:
+    for key in ["checkin_ts", "scores", "checkins", "shares"]:
         if key not in m:
             m[key] = {}
     return m
@@ -117,6 +117,18 @@ def set_checkin_count(g, uid, month, week, count):
     """直接設定打卡次數（補打卡用）"""
     key = checkin_key(month, week)
     g["members"][uid]["checkins"][key] = count
+
+# ── 分享次數 ──────────────────────────────────────────────
+def share_key(month):
+    return f"share_{month}"
+
+def get_shares(g, uid, month):
+    return g["members"].get(uid, {}).get("shares", {}).get(share_key(month), 0)
+
+def add_share(g, uid, month):
+    key = share_key(month)
+    g["members"][uid].setdefault("shares", {})
+    g["members"][uid]["shares"][key] = g["members"][uid]["shares"].get(key, 0) + 1
 
 # ── 分數 ─────────────────────────────────────────────────
 def get_monthly_score(g, uid, month):
@@ -336,6 +348,13 @@ def handle_message(event):
                 else:
                     rep = f"✅ 名稱已從「{old}」更新為「{new_name}」"
 
+    # 我要分享
+    elif text == "我要分享":
+        name = get_display_name(g, uid)
+        add_share(g, uid, month)
+        total = get_shares(g, uid, month)
+        rep = f"📢 {name} 分享成功！\n本月累計分享：{total} 次"
+
     # 達標／達成／完成
     elif text in ["達標", "達成", "完成"]:
         name = get_display_name(g, uid)
@@ -360,10 +379,16 @@ def handle_message(event):
         last_ranks = sorted(set(r for r, _, _ in ranking), reverse=True)[:3]
         lines = [f"📊 第 {month} 月分數排行榜（共 {len(ranking)} 人）\n"]
         for rank, name, score in ranking:
+            # 找回 uid 取分享次數
+            uid_for = next((mid for mid, m in g["members"].items()
+                           if get_display_name(g, mid) == name), None)
+            shares = get_shares(g, uid_for, month) if uid_for else 0
+            share_str = f" 📢{shares}" if shares > 0 else ""
             tag = " 🍽️" if rank in last_ranks and len(ranking) >= 4 else ""
-            lines.append(f"{rank_medal(rank)} {name}：{score} 分{tag}")
+            lines.append(f"{rank_medal(rank)} {name}：{score} 分{share_str}{tag}")
         if len(ranking) >= 4:
             lines.append("\n🍽️ 最後三名本月要請第一名吃飯，一起加油！")
+        lines.append("\n📢 = 本月分享次數")
         rep = "\n".join(lines)
 
     # 週排行
@@ -388,9 +413,11 @@ def handle_message(event):
             cd_msg = f"下次打卡：{hrs} 小時 {mins} 分後"
         else:
             cd_msg = "現在可以打卡 ✅"
+        shares = get_shares(g, uid, month)
         rep = (f"👤 {name}\n"
                f"本月累計分數：{get_monthly_score(g, uid, month)} 分\n"
                f"本週打卡次數：{get_checkins(g, uid, month, week)} / {limit} 次\n"
+               f"本月分享次數：{shares} 次 📢\n"
                f"{cd_msg}")
 
     # 本週任務
@@ -404,7 +431,8 @@ def handle_message(event):
             "【所有成員】\n"
             "/我是 [名字] — 登記或修改名稱\n"
             "達標 — 今日任務打卡（12小時冷卻）\n"
-            "排行榜 — 本月分數排行（完整）\n"
+            "我要分享 — 記錄本月分享次數\n"
+            "排行榜 — 本月分數排行（含分享次數）\n"
             "週排行 — 本週打卡次數排行（完整）\n"
             "歷史任務 — 查看前四週任務\n"
             "我的分數 — 查看分數與打卡狀態\n"
@@ -682,11 +710,16 @@ def handle_message(event):
             first_name = ranking[0][1] if ranking else "第一名"
             lines = [f"🏆 第 {month} 月最終結算（共 {len(ranking)} 人）\n"]
             for rank, name, score in ranking:
+                uid_for = next((mid for mid, m in g["members"].items()
+                               if get_display_name(g, mid) == name), None)
+                shares = get_shares(g, uid_for, month) if uid_for else 0
+                share_str = f" 📢{shares}" if shares > 0 else ""
                 tag = " 🍽️" if rank in last_ranks and len(ranking) >= 4 else ""
-                lines.append(f"{rank_medal(rank)} {name}：{score} 分{tag}")
+                lines.append(f"{rank_medal(rank)} {name}：{score} 分{share_str}{tag}")
             if len(ranking) >= 4:
                 lines.append(f"\n🍽️ 最後三名要請 {first_name} 吃飯喔！")
                 lines.append("感謝大家這個月的努力，繼續加油！🎉")
+            lines.append("\n📢 = 本月分享次數")
             rep = "\n".join(lines)
 
     if rep:
