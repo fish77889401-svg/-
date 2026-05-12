@@ -16,7 +16,6 @@ from linebot.v3.webhooks import (
     JoinEvent, MemberJoinedEvent
 )
 from pymongo import MongoClient
-from flask_cors import CORS
 
 app = Flask(__name__)
 
@@ -26,7 +25,6 @@ MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://linebotuser:linebot1234@c
 
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
-CORS(app, origins=["https://fish77889401-svg.github.io", "https://liff.line.me"])
 TZ = timezone(timedelta(hours=8))
 CHECKIN_COOLDOWN = 12 * 3600
 
@@ -266,6 +264,26 @@ def reply_msg(event, text):
         MessagingApi(api_client).reply_message(
             ReplyMessageRequest(reply_token=event.reply_token,
                                 messages=[TextMessage(text=text)]))
+
+# ── CORS 設定 ────────────────────────────────────────────
+@app.after_request
+def add_cors(response):
+    origin = request.headers.get("Origin", "")
+    allowed = ["https://fish77889401-svg.github.io", "https://liff.line.me"]
+    if any(origin.startswith(a) for a in allowed) or not origin:
+        response.headers["Access-Control-Allow-Origin"] = origin or "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+@app.route("/splitbill/<path:path>", methods=["OPTIONS"])
+def handle_options(path):
+    from flask import Response
+    resp = Response()
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
 
 # ── 分帳 API ──────────────────────────────────────────────
 @app.route("/splitbill/members", methods=["GET"])
