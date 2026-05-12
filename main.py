@@ -265,6 +265,118 @@ def reply_msg(event, text):
             ReplyMessageRequest(reply_token=event.reply_token,
                                 messages=[TextMessage(text=text)]))
 
+# ── 分帳 API ──────────────────────────────────────────────
+@app.route("/splitbill/members", methods=["GET"])
+def sb_members():
+    from flask import jsonify, request as req
+    gid = req.args.get("group", "default")
+    data = load_data()
+    g = data["groups"].get(gid, {})
+    members = [m["name"] for m in g.get("members", {}).values()
+               if not m["name"].startswith("成員_")]
+    return jsonify({"members": members})
+
+@app.route("/splitbill/books", methods=["GET"])
+def sb_books():
+    from flask import jsonify, request as req
+    gid = req.args.get("group", "default")
+    data = load_data()
+    g = get_group(data, gid)
+    books = g.get("splitbooks", [])
+    save_data(data)
+    return jsonify({"books": books})
+
+@app.route("/splitbill/book", methods=["POST"])
+def sb_create_book():
+    from flask import jsonify, request as req
+    body = req.json
+    gid = body.get("groupId", "default")
+    data = load_data()
+    g = get_group(data, gid)
+    g.setdefault("splitbooks", []).insert(0, body["book"])
+    save_data(data)
+    return jsonify({"ok": True})
+
+@app.route("/splitbill/book/close", methods=["POST"])
+def sb_close_book():
+    from flask import jsonify, request as req
+    body = req.json
+    gid = body.get("groupId", "default")
+    data = load_data()
+    g = get_group(data, gid)
+    for b in g.get("splitbooks", []):
+        if b["id"] == body["bookId"]:
+            b["closed"] = True
+    save_data(data)
+    return jsonify({"ok": True})
+
+@app.route("/splitbill/book/reopen", methods=["POST"])
+def sb_reopen_book():
+    from flask import jsonify, request as req
+    body = req.json
+    gid = body.get("groupId", "default")
+    data = load_data()
+    g = get_group(data, gid)
+    for b in g.get("splitbooks", []):
+        if b["id"] == body["bookId"]:
+            b["closed"] = False
+    save_data(data)
+    return jsonify({"ok": True})
+
+@app.route("/splitbill/expense", methods=["POST"])
+def sb_add_expense():
+    from flask import jsonify, request as req
+    body = req.json
+    gid = body.get("groupId", "default")
+    data = load_data()
+    g = get_group(data, gid)
+    for b in g.get("splitbooks", []):
+        if b["id"] == body["bookId"]:
+            b.setdefault("expenses", []).append(body["expense"])
+    save_data(data)
+    return jsonify({"ok": True})
+
+@app.route("/splitbill/book/addmember", methods=["POST"])
+def sb_add_member():
+    from flask import jsonify, request as req
+    body = req.json
+    gid = body.get("groupId", "default")
+    data = load_data()
+    g = get_group(data, gid)
+    for b in g.get("splitbooks", []):
+        if b["id"] == body["bookId"]:
+            b["members"] = body["members"]
+    save_data(data)
+    return jsonify({"ok": True})
+
+@app.route("/splitbill/expense/edit", methods=["POST"])
+def sb_edit_expense():
+    from flask import jsonify, request as req
+    body = req.json
+    gid = body.get("groupId", "default")
+    data = load_data()
+    g = get_group(data, gid)
+    for b in g.get("splitbooks", []):
+        if b["id"] == body["bookId"]:
+            for i, e in enumerate(b.get("expenses", [])):
+                if e["id"] == body["expense"]["id"]:
+                    b["expenses"][i] = body["expense"]
+    save_data(data)
+    return jsonify({"ok": True})
+
+@app.route("/splitbill/expense/delete", methods=["POST"])
+def sb_delete_expense():
+    from flask import jsonify, request as req
+    body = req.json
+    gid = body.get("groupId", "default")
+    data = load_data()
+    g = get_group(data, gid)
+    for b in g.get("splitbooks", []):
+        if b["id"] == body["bookId"]:
+            b["expenses"] = [e for e in b.get("expenses",[]) if e["id"] != body["expId"]]
+    save_data(data)
+    return jsonify({"ok": True})
+
 # ── Webhook ───────────────────────────────────────────────
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -475,6 +587,11 @@ def handle_message(event):
                f"本月分享次數：{shares} 次 📢\n"
                f"{cd_msg}")
 
+    # 分帳
+    elif text in ["分帳", "/分帳"]:
+        liff_url = "https://liff.line.me/2010052774-AyGqRPDF"
+        rep = f"💰 副班長分帳\n\n點下方連結開啟分帳功能：\n{liff_url}\n\n建立帳本、記錄支出、自動結算誰欠誰多少錢！"
+
     # 本週任務
     elif text in ["本週任務", "/本週任務"]:
         rep = f"📋 第 {week} 週任務：\n{g['current_task']}"
@@ -487,6 +604,7 @@ def handle_message(event):
             "/我是 [名字] — 登記或修改名稱\n"
             "達標 — 今日任務打卡（12小時冷卻）\n"
             "我要分享 — 記錄本月分享次數\n"
+            "分帳 — 開啟分帳功能\n"
             "排行榜 — 本月分數排行（含分享次數）\n"
             "週排行 — 本週打卡次數排行（完整）\n"
             "歷史任務 — 查看前四週任務\n"
