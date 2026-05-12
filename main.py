@@ -609,8 +609,9 @@ def handle_message(event):
 
     # 分帳
     elif text in ["分帳", "/分帳"]:
-        liff_url = "https://liff.line.me/2010052774-AyGqRPDF"
-        rep = f"💰 副班長分帳\n\n點下方連結開啟分帳功能：\n{liff_url}\n\n建立帳本、記錄支出、自動結算誰欠誰多少錢！"
+        gid_param = gid if gid != "default" else "default"
+        liff_url = f"https://liff.line.me/2010052774-AyGqRPDF?gid={gid_param}"
+        rep = f"💰 副班長分帳\n\n點下方連結開啟：\n{liff_url}\n\n建立帳本、記錄支出、自動結算誰欠誰多少錢！"
 
     # 本週任務
     elif text in ["本週任務", "/本週任務"]:
