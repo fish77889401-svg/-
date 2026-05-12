@@ -16,6 +16,7 @@ from linebot.v3.webhooks import (
     JoinEvent, MemberJoinedEvent
 )
 from pymongo import MongoClient
+from flask_cors import CORS
 
 app = Flask(__name__)
 
@@ -25,6 +26,7 @@ MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://linebotuser:linebot1234@c
 
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
+CORS(app, origins=["https://fish77889401-svg.github.io", "https://liff.line.me"])
 TZ = timezone(timedelta(hours=8))
 CHECKIN_COOLDOWN = 12 * 3600
 
