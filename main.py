@@ -265,6 +265,18 @@ def reply_msg(event, text):
             ReplyMessageRequest(reply_token=event.reply_token,
                                 messages=[TextMessage(text=text)]))
 
+# ── 用戶群組對應 API ─────────────────────────────────────
+@app.route("/splitbill/user-group", methods=["GET"])
+def sb_user_group():
+    from flask import jsonify, request as req
+    uid = req.args.get("uid", "")
+    data = load_data()
+    # 從所有群組找這個 user 在哪個群組
+    for gid, g in data["groups"].items():
+        if uid in g.get("members", {}):
+            return jsonify({"gid": gid})
+    return jsonify({"gid": "default"})
+
 # ── CORS 設定 ────────────────────────────────────────────
 @app.after_request
 def add_cors(response):
